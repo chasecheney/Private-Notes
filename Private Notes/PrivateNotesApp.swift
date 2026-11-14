@@ -11,7 +11,17 @@ struct PrivateNotesApp: App {
                 .environment(model)
         }
         .onChange(of: scenePhase) { _, newPhase in
-            if newPhase != .active {
+            switch newPhase {
+            case .active:
+                model.noteActivity()
+            case .background:
+                #if os(iOS)
+                // Leaving the app on iPhone and iPad locks the vault.
+                model.lock()
+                #else
+                model.flushPendingSaves()
+                #endif
+            default:
                 model.flushPendingSaves()
             }
         }

@@ -109,7 +109,7 @@ final class VaultStoreTests: XCTestCase {
         try session.save(Note(folderID: folder.id, body: "GIRAFFETITLE\nOKAPIBODYTEXT"))
 
         let files = try allFiles()
-        XCTAssertEqual(files.count, 3) // key bundle, one folder, one note
+        XCTAssertEqual(files.count, 4) // key bundle, key check, one folder, one note
         for file in files {
             let data = try Data(contentsOf: file)
             for word in ["ZEBRAFOLDERNAME", "GIRAFFETITLE", "OKAPIBODYTEXT"] {
@@ -187,6 +187,52 @@ final class VaultStoreTests: XCTestCase {
         let reopened = try store.unlock(password: "new password")
         XCTAssertEqual(try reopened.loadNotes().items, [note])
         XCTAssertNoThrow(try store.unlock(recoveryPhrase: phrase))
+    }
+
+    func testVerifyPassword() throws {
+        _ = try store.createVault(password: "pw", parameters: testKDF)
+        XCTAssertNoThrow(try store.verify(password: "pw"))
+        XCTAssertThrowsError(try store.verify(password: "nope")) {
+            XCTAssertEqual($0 as? CryptoError, .wrongSecretOrCorruptKeyData)
+        }
+    }
+
+    func testStoredKeyUnlocksOnlyItsOwnVault() throws {
+        let session = try store.createVault(password: "pw", parameters: testKDF).session
+        let note = Note(body: "hello")
+        try session.save(note)
+        let rawKey = session.masterKey.rawBytes()
+
+        let reopened = try store.unlock(rawMasterKey: rawKey)
+        XCTAssertEqual(try reopened.loadNotes().items, [note])
+
+        var wrongKey = rawKey
+        wrongKey[0] ^= 0x01
+        XCTAssertThrowsError(try store.unlock(rawMasterKey: wrongKey)) {
+            XCTAssertEqual($0 as? CryptoError, .wrongSecretOrCorruptKeyData)
+        }
+        XCTAssertThrowsError(try store.unlock(rawMasterKey: Data(repeating: 0, count: 5)))
+    }
+
+    func testStoredKeyRefusedUntilKeyCheckExists() throws {
+        // A vault from before the key check: the stored key is not trusted until a
+        // password unlock has written the check.
+        let session = try store.createVault(password: "pw", parameters: testKDF).session
+        let rawKey = session.masterKey.rawBytes()
+        try FileManager.default.removeItem(at: directory.appendingPathComponent("keycheck.pnote"))
+
+        XCTAssertThrowsError(try store.unlock(rawMasterKey: rawKey))
+        _ = try store.unlock(password: "pw")
+        XCTAssertNoThrow(try store.unlock(rawMasterKey: rawKey))
+    }
+
+    func testReadOnlyAndNeverSyncFlagsPersist() throws {
+        let session = try store.createVault(password: "pw", parameters: testKDF).session
+        let note = Note(body: "seed", isReadOnly: true, neverSync: true)
+        try session.save(note)
+        let loaded = try store.unlock(password: "pw").loadNotes().items
+        XCTAssertEqual(loaded.first?.isReadOnly, true)
+        XCTAssertEqual(loaded.first?.neverSync, true)
     }
 
     func testTitleAndPreview() {

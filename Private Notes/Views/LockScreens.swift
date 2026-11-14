@@ -178,6 +178,15 @@ struct UnlockView: View {
             .buttonStyle(.borderedProminent)
             .disabled(password.isEmpty || model.isWorking)
 
+            if model.canUnlockWithBiometrics, let name = model.biometryName {
+                Button {
+                    Task { await model.unlockWithBiometrics() }
+                } label: {
+                    Label("Unlock with \(name)", systemImage: name == "Touch ID" ? "touchid" : "faceid")
+                }
+                .disabled(model.isWorking)
+            }
+
             Button("Forgot password? Use recovery phrase") {
                 model.errorMessage = nil
                 usingRecoveryPhrase = true
@@ -185,6 +194,13 @@ struct UnlockView: View {
             .buttonStyle(.borderless)
         }
         .onAppear { passwordFocused = true }
+        .task {
+            // Offer Touch ID / Face ID straight away, once, when the app opens.
+            if model.shouldAutoPromptBiometrics {
+                model.shouldAutoPromptBiometrics = false
+                await model.unlockWithBiometrics()
+            }
+        }
     }
 
     private var recoveryForm: some View {

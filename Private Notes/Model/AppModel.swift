@@ -1,5 +1,8 @@
 import Foundation
 import Observation
+#if os(macOS)
+import AppKit
+#endif
 import PrivateNotesCrypto
 import PrivateNotesStore
 
@@ -26,6 +29,8 @@ final class AppModel {
     }
 
     static let minimumPasswordLength = 10
+    /// Lock after this long without keyboard or mouse activity.
+    static let inactivityTimeout: TimeInterval = 5 * 60
 
     private(set) var phase: Phase
     private(set) var folders: [Folder] = []
@@ -36,13 +41,36 @@ final class AppModel {
     private(set) var isWorking = false
     var errorMessage: String?
 
+    /// "Touch ID" / "Face ID", or nil when this device has none.
+    private(set) var biometryName: String?
+    /// True when the unlock screen can offer Touch ID / Face ID right now.
+    private(set) var canUnlockWithBiometrics = false
+    /// Why biometric unlock could not be turned on, if it couldn't.
+    private(set) var biometricSetupProblem: String?
+    /// The unlock screen prompts for biometrics by itself once, at launch.
+    var shouldAutoPromptBiometrics = true
+
+    /// User setting: offer Touch ID / Face ID to view notes.
+    private(set) var biometricUnlockEnabled: Bool
+
     @ObservationIgnored private let store: VaultStore
     @ObservationIgnored private var session: VaultSession?
     @ObservationIgnored private var saveTasks: [UUID: Task<Void, Never>] = [:]
+    @ObservationIgnored private var lastActivity = Date()
+    @ObservationIgnored private var inactivityTask: Task<Void, Never>?
+
+    private static let biometricEnabledKey = "biometricUnlockEnabled"
+    private static let passwordUnlockBootTimeKey = "passwordUnlockBootTime"
 
     init(store: VaultStore = VaultStore(directory: AppModel.defaultVaultDirectory)) {
         self.store = store
         self.phase = store.isInitialized ? .locked : .needsSetup
+        self.biometricUnlockEnabled =
+            UserDefaults.standard.object(forKey: Self.biometricEnabledKey) as? Bool ?? true
+        self.biometryName = VaultStore.biometryName
+        refreshBiometricAvailability()
+        startInactivityTimer()
+        observeSystemLockEvents()
     }
 
     nonisolated static var defaultVaultDirectory: URL {
@@ -60,6 +88,7 @@ final class AppModel {
                 try store.createVault(password: password)
             }.value
             self.session = created.session
+            self.didUnlockWithPassword()
             self.phase = .showingRecoveryPhrase(created.recoveryPhrase.words)
         }
     }
@@ -78,8 +107,38 @@ final class AppModel {
                 try store.unlock(password: password)
             }.value
             self.session = session
+            self.didUnlockWithPassword()
             self.loadEverything()
+            self.noteActivity()
             self.phase = .unlocked
+        }
+    }
+
+    /// Shows the Touch ID / Face ID prompt. On failure the password field is still there.
+    func unlockWithBiometrics() async {
+        guard phase == .locked, canUnlockWithBiometrics else { return }
+        let store = self.store
+        let reason = "unlock your notes"
+        await runKeyOperation {
+            do {
+                let session = try await Task.detached(priority: .userInitiated) {
+                    try store.unlockWithBiometrics(reason: reason)
+                }.value
+                self.session = session
+                self.loadEverything()
+                self.noteActivity()
+                self.phase = .unlocked
+            } catch BiometricError.cancelled {
+                // Dismissed: stay on the unlock screen without an error.
+            } catch BiometricError.noStoredKey {
+                self.refreshBiometricAvailability()
+                self.errorMessage = "\(self.biometryName ?? "Biometric unlock") needs your password once, because the enrolled fingerprints or faces changed."
+            } catch CryptoError.wrongSecretOrCorruptKeyData {
+                // The stored key is not this vault's key. Drop it; the password sets it up again.
+                store.disableBiometricUnlock()
+                self.refreshBiometricAvailability()
+                self.errorMessage = "Enter your password to unlock."
+            }
         }
     }
 
@@ -99,24 +158,126 @@ final class AppModel {
             try await Task.detached(priority: .userInitiated) {
                 try store.changePassword(to: password, session: session)
             }.value
+            self.didUnlockWithPassword()
             self.loadEverything()
+            self.noteActivity()
             self.phase = .unlocked
         }
     }
 
     /// Saves anything pending, then forgets the key and all decrypted content.
+    /// Does nothing while the recovery phrase is on screen: it is shown only once.
     func lock() {
+        guard phase == .unlocked || phase == .mustSetNewPassword else { return }
         flushPendingSaves()
         session = nil
         folders = []
         notes = []
         unreadableCount = 0
         errorMessage = nil
-        if store.isInitialized {
-            phase = .locked
+        phase = .locked
+        refreshBiometricAvailability()
+    }
+
+    // MARK: - Touch ID / Face ID
+
+    func setBiometricUnlockEnabled(_ enabled: Bool) {
+        biometricUnlockEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.biometricEnabledKey)
+        applyBiometricSetting()
+    }
+
+    /// After any unlock that proved knowledge of the password or recovery phrase.
+    private func didUnlockWithPassword() {
+        UserDefaults.standard.set(Self.bootTime, forKey: Self.passwordUnlockBootTimeKey)
+        applyBiometricSetting()
+    }
+
+    /// Stores or removes the biometric copy of the key to match the setting.
+    private func applyBiometricSetting() {
+        biometricSetupProblem = nil
+        if biometricUnlockEnabled {
+            if let session, biometryName != nil {
+                do {
+                    try store.enableBiometricUnlock(session: session)
+                } catch BiometricError.keychain(let status) {
+                    biometricSetupProblem = "The Keychain refused to store the key (error \(status))."
+                } catch {
+                    biometricSetupProblem = "\(biometryName ?? "Biometric unlock") isn't available right now."
+                }
+            }
         } else {
-            phase = .needsSetup
+            store.disableBiometricUnlock()
         }
+        refreshBiometricAvailability()
+    }
+
+    /// Biometrics are offered only when the device has them, the setting is on, a key is stored,
+    /// and the password has been entered since the last restart.
+    private func refreshBiometricAvailability() {
+        biometryName = VaultStore.biometryName
+        let storedBoot = UserDefaults.standard.double(forKey: Self.passwordUnlockBootTimeKey)
+        let passwordUsedSinceRestart = storedBoot > 0 && abs(storedBoot - Self.bootTime) < 120
+        canUnlockWithBiometrics =
+            biometricUnlockEnabled && biometryName != nil && passwordUsedSinceRestart && store.hasBiometricKey
+    }
+
+    /// When this device last started, as seconds since 1970.
+    private static var bootTime: TimeInterval {
+        var time = timeval()
+        var size = MemoryLayout<timeval>.stride
+        var name: [Int32] = [CTL_KERN, KERN_BOOTTIME]
+        guard sysctl(&name, 2, &time, &size, nil, 0) == 0 else { return 0 }
+        return TimeInterval(time.tv_sec)
+    }
+
+    // MARK: - Automatic locking
+
+    /// Call on any sign the user is present. Resets the inactivity countdown.
+    func noteActivity() {
+        lastActivity = Date()
+    }
+
+    private func startInactivityTimer() {
+        inactivityTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                guard let self else { return }
+                if self.phase == .unlocked,
+                   Date().timeIntervalSince(self.lastActivity) >= Self.inactivityTimeout {
+                    self.lock()
+                }
+            }
+        }
+    }
+
+    private func observeSystemLockEvents() {
+        #if os(macOS)
+        // Keyboard and mouse use inside the app counts as activity.
+        _ = NSEvent.addLocalMonitorForEvents(
+            matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel, .mouseMoved]
+        ) { [weak self] event in
+            MainActor.assumeIsolated { self?.noteActivity() }
+            return event
+        }
+
+        // Sleep, display sleep, fast user switching, and the lock screen all lock the vault.
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [
+            NSWorkspace.willSleepNotification,
+            NSWorkspace.screensDidSleepNotification,
+            NSWorkspace.sessionDidResignActiveNotification,
+        ] {
+            _ = workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.lock() }
+            }
+        }
+        _ = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.lock() }
+        }
+        #endif
     }
 
     private func runKeyOperation(_ work: () async throws -> Void) async {
@@ -192,9 +353,13 @@ final class AppModel {
         return note.id
     }
 
-    /// Text changed in the editor. Saved shortly after typing stops.
+    /// Text changed in the editor. Saved shortly after typing stops. Read-only notes don't change.
     func updateBody(_ id: UUID, _ body: String) {
-        guard let index = notes.firstIndex(where: { $0.id == id }), notes[index].body != body else { return }
+        noteActivity()
+        guard let index = notes.firstIndex(where: { $0.id == id }),
+              !notes[index].isReadOnly,
+              notes[index].body != body
+        else { return }
         notes[index].body = body
         notes[index].modifiedAt = Date()
         scheduleSave(id)
@@ -212,7 +377,34 @@ final class AppModel {
         saveNow(id)
     }
 
+    /// Protects a note against accidental edits and deletion. No password needed to turn on.
+    func makeReadOnly(_ id: UUID) {
+        guard let index = notes.firstIndex(where: { $0.id == id }), !notes[index].isReadOnly else { return }
+        notes[index].isReadOnly = true
+        saveNow(id)
+    }
+
+    /// Makes a read-only note editable again, if the password is right. Returns whether it was.
+    func unlockForEditing(_ id: UUID, password: String) async -> Bool {
+        let store = self.store
+        var succeeded = false
+        await runKeyOperation {
+            try await Task.detached(priority: .userInitiated) {
+                try store.verify(password: password)
+            }.value
+            guard let index = self.notes.firstIndex(where: { $0.id == id }) else { return }
+            self.notes[index].isReadOnly = false
+            self.saveNow(id)
+            succeeded = true
+        }
+        // The prompt shows its own message; keep the app-wide error alert out of it.
+        errorMessage = nil
+        return succeeded
+    }
+
+    /// Read-only notes can't be deleted; make them editable first.
     func deleteNote(_ id: UUID) {
+        guard note(id)?.isReadOnly != true else { return }
         saveTasks[id]?.cancel()
         saveTasks[id] = nil
         notes.removeAll { $0.id == id }
@@ -288,7 +480,7 @@ final class AppModel {
     static func describe(_ error: Error) -> String {
         switch error {
         case CryptoError.wrongSecretOrCorruptKeyData:
-            return "That didn't unlock the vault. Check it and try again."
+            return "That's not right. Check it and try again."
         case CryptoError.invalidRecoveryPhrase:
             return "That isn't a valid recovery phrase. It should be 24 words; check the spelling of each."
         case CryptoError.keyDerivationFailed:
@@ -301,6 +493,10 @@ final class AppModel {
             return "A vault already exists on this device."
         case VaultError.notInitialized:
             return "No vault has been set up yet."
+        case BiometricError.unavailable:
+            return "Biometric unlock isn't available on this device."
+        case BiometricError.keychain(let status):
+            return "The Keychain reported an error (\(status)). Use your password."
         default:
             return error.localizedDescription
         }

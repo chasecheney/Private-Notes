@@ -10,6 +10,8 @@ public enum ItemKind: String, Codable, Sendable {
     case attachment
     /// A folder's name and settings.
     case folder
+    /// A fixed marker the vault uses to confirm that a key belongs to it.
+    case keyCheck
 }
 
 /// Identifies one encrypted item. The same kind and id must be given to open it again.

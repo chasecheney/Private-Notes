@@ -31,6 +31,35 @@ public final class VaultSession: Sendable {
     public func deleteFolder(id: UUID) throws { try remove(.folder, id) }
     public func deleteNote(id: UUID) throws { try remove(.note, id) }
 
+    // MARK: - Key check
+
+    private static let keyCheckContext = ItemContext(
+        kind: .keyCheck,
+        id: UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+    )
+    private static let keyCheckMarker = Data("PrivateNotes key check v1".utf8)
+
+    private var keyCheckURL: URL {
+        directory.appendingPathComponent("keycheck").appendingPathExtension(Self.fileExtension)
+    }
+
+    var hasKeyCheck: Bool {
+        FileManager.default.fileExists(atPath: keyCheckURL.path)
+    }
+
+    /// Writes a small encrypted marker. A key that can open it is this vault's key.
+    func writeKeyCheck() throws {
+        try VaultFiles.write(try cipher.seal(Self.keyCheckMarker, for: Self.keyCheckContext), to: keyCheckURL)
+    }
+
+    /// True only if this session's key opens the vault's marker.
+    func keyCheckPasses() -> Bool {
+        guard let sealed = try? Data(contentsOf: keyCheckURL),
+              let plain = try? cipher.open(sealed, for: Self.keyCheckContext)
+        else { return false }
+        return plain == Self.keyCheckMarker
+    }
+
     // MARK: - Files
 
     private func folderURL(for kind: ItemKind) -> URL {
@@ -39,6 +68,7 @@ public final class VaultSession: Sendable {
         case .note: name = "notes"
         case .folder: name = "folders"
         case .attachment: name = "attachments"
+        case .keyCheck: name = "check"
         }
         return directory.appendingPathComponent(name, isDirectory: true)
     }

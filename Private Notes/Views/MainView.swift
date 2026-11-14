@@ -53,6 +53,7 @@ struct FolderListView: View {
     @State private var folderBeingRenamed: Folder?
     @State private var folderBeingDeleted: Folder?
     @State private var nameField = ""
+    @State private var showingSettings = false
 
     var body: some View {
         List(selection: $selection) {
@@ -107,6 +108,16 @@ struct FolderListView: View {
                 }
                 .help("Lock Private Notes")
             }
+            ToolbarItem {
+                Button {
+                    showingSettings = true
+                } label: {
+                    Label("Settings", systemImage: "gearshape")
+                }
+            }
+        }
+        .sheet(isPresented: $showingSettings) {
+            SettingsView()
         }
         .alert("New Folder", isPresented: $showingNewFolder) {
             TextField("Name", text: $nameField)
@@ -185,8 +196,15 @@ struct NoteListView: View {
                                 .disabled(note.folderID == destination.id)
                             }
                         }
-                        Button("Delete…", role: .destructive) {
-                            noteBeingDeleted = note
+                        if note.isReadOnly {
+                            Text("Read-only: make editable to delete")
+                        } else {
+                            Button("Make Read-Only") {
+                                model.makeReadOnly(note.id)
+                            }
+                            Button("Delete…", role: .destructive) {
+                                noteBeingDeleted = note
+                            }
                         }
                     }
             }
@@ -247,6 +265,11 @@ private struct NoteRow: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
+                if note.isReadOnly {
+                    Image(systemName: "lock.doc")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Text(note.title.isEmpty ? "New Note" : note.title)
                     .font(.headline)
                     .lineLimit(1)
@@ -263,14 +286,56 @@ private struct NoteRow: View {
     }
 }
 
-/// Plain-text editor for one note. Rich text and images come later.
+/// One note: a plain-text editor, or a selectable read-only view when the note is protected.
+/// Rich text and images come later.
 struct NoteEditorView: View {
     @Environment(AppModel.self) private var model
     let noteID: UUID
     @State private var text = ""
     @State private var loaded = false
+    @State private var showingPasswordPrompt = false
+
+    private var isReadOnly: Bool {
+        model.note(noteID)?.isReadOnly ?? false
+    }
 
     var body: some View {
+        Group {
+            if isReadOnly {
+                readOnlyBody
+            } else {
+                editor
+            }
+        }
+        .toolbar {
+            ToolbarItem {
+                if isReadOnly {
+                    Button {
+                        showingPasswordPrompt = true
+                    } label: {
+                        Label("Edit…", systemImage: "pencil")
+                    }
+                    .help("Make this note editable (asks for your password)")
+                } else {
+                    Button {
+                        model.flushPendingSaves()
+                        model.makeReadOnly(noteID)
+                    } label: {
+                        Label("Make Read-Only", systemImage: "lock.doc")
+                    }
+                    .help("Protect this note from accidental changes")
+                }
+            }
+        }
+        .sheet(isPresented: $showingPasswordPrompt) {
+            EditPasswordPrompt(noteID: noteID)
+        }
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+    }
+
+    private var editor: some View {
         TextEditor(text: $text)
             .font(.body)
             .padding(.horizontal, 12)
@@ -285,10 +350,148 @@ struct NoteEditorView: View {
                 }
             }
             .onDisappear {
+                loaded = false
                 model.flushPendingSaves()
             }
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
+    }
+
+    private var readOnlyBody: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "lock.doc")
+                Text("Read-only")
+                Spacer()
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(.quaternary.opacity(0.4))
+
+            ScrollView {
+                Text(model.note(noteID)?.body ?? "")
+                    .font(.body)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+            }
+        }
+    }
+}
+
+/// Asks for the app password before a read-only note becomes editable.
+private struct EditPasswordPrompt: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let noteID: UUID
+    @State private var password = ""
+    @State private var wrongPassword = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "lock.doc")
+                .font(.system(size: 34))
+                .foregroundStyle(.tint)
+            Text("Edit read-only note")
+                .font(.headline)
+            Text("Enter your password to make this note editable.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            SecureField("Password", text: $password)
+                .textFieldStyle(.roundedBorder)
+                .focused($focused)
+                .onSubmit(submit)
+            if wrongPassword {
+                Text("That's not the right password.")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+            }
+            HStack {
+                Button("Cancel", role: .cancel) {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+                Button(action: submit) {
+                    if model.isWorking {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text("Make Editable")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(password.isEmpty || model.isWorking)
+            }
+        }
+        .padding(24)
+        .frame(minWidth: 320, maxWidth: 380)
+        .onAppear { focused = true }
+        .presentationDetents([.medium])
+    }
+
+    private func submit() {
+        guard !password.isEmpty else { return }
+        let entered = password
+        Task {
+            if await model.unlockForEditing(noteID, password: entered) {
+                dismiss()
+            } else {
+                password = ""
+                wrongPassword = true
+            }
+        }
+    }
+}
+
+/// App settings. For now: whether Touch ID / Face ID can unlock the vault.
+struct SettingsView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Settings")
+                .font(.title3.bold())
+
+            if let name = model.biometryName {
+                Toggle(
+                    "Unlock with \(name)",
+                    isOn: Binding(
+                        get: { model.biometricUnlockEnabled },
+                        set: { model.setBiometricUnlockEnabled($0) }
+                    )
+                )
+                Text("Your password is still needed after a restart, and after fingerprints or faces are added or changed on this device.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let problem = model.biometricSetupProblem {
+                    Label(problem, systemImage: "exclamationmark.triangle")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
+                Text("This device has no Touch ID or Face ID set up, so the password is always used.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text("Private Notes locks after 5 minutes without activity, and when this device sleeps or locks.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(minWidth: 340, maxWidth: 440)
+        .presentationDetents([.medium])
     }
 }
