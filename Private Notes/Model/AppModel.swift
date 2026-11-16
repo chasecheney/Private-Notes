@@ -58,6 +58,8 @@ final class AppModel {
     @ObservationIgnored private var saveTasks: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private var lastActivity = Date()
     @ObservationIgnored private var inactivityTask: Task<Void, Never>?
+    /// Decrypted images, kept only while unlocked.
+    @ObservationIgnored private var imageCache: [UUID: PlatformImage] = [:]
 
     private static let biometricEnabledKey = "biometricUnlockEnabled"
     private static let passwordUnlockBootTimeKey = "passwordUnlockBootTime"
@@ -173,6 +175,7 @@ final class AppModel {
         session = nil
         folders = []
         notes = []
+        imageCache = [:]
         unreadableCount = 0
         errorMessage = nil
         phase = .locked
@@ -300,6 +303,7 @@ final class AppModel {
             folders = loadedFolders.items
             notes = loadedNotes.items
             unreadableCount = loadedFolders.unreadableCount + loadedNotes.unreadableCount
+            removeUnusedAttachments()
         } catch {
             errorMessage = Self.describe(error)
         }
@@ -353,16 +357,63 @@ final class AppModel {
         return note.id
     }
 
-    /// Text changed in the editor. Saved shortly after typing stops. Read-only notes don't change.
-    func updateBody(_ id: UUID, _ body: String) {
+    /// The note's formatted content, for loading into the editor.
+    func content(_ id: UUID) -> RichText {
+        note(id)?.content ?? RichText(plainText: "")
+    }
+
+    /// The editor's content changed. Saved shortly after typing stops. Read-only notes don't change.
+    func updateContent(_ id: UUID, _ content: RichText) {
         noteActivity()
         guard let index = notes.firstIndex(where: { $0.id == id }),
               !notes[index].isReadOnly,
-              notes[index].body != body
+              notes[index].richText != content
         else { return }
-        notes[index].body = body
+        notes[index].setContent(content)
         notes[index].modifiedAt = Date()
         scheduleSave(id)
+    }
+
+    // MARK: - Images
+
+    /// Encrypts and stores an image (with its location data removed) and returns it ready to insert.
+    func addImage(_ data: Data) -> (id: UUID, image: PlatformImage)? {
+        guard let session else { return nil }
+        guard let cleaned = ImageImport.strippingLocation(data), let image = PlatformImage(data: cleaned) else {
+            errorMessage = "That isn't an image Private Notes can read."
+            return nil
+        }
+        let id = UUID()
+        do {
+            try session.saveAttachment(id: id, data: cleaned)
+        } catch {
+            errorMessage = Self.describe(error)
+            return nil
+        }
+        imageCache[id] = image
+        return (id, image)
+    }
+
+    /// A decrypted image for display, or nil if it is missing or damaged.
+    func image(for id: UUID) -> PlatformImage? {
+        if let cached = imageCache[id] { return cached }
+        guard let session,
+              let data = try? session.loadAttachment(id: id),
+              let image = PlatformImage(data: data)
+        else { return nil }
+        imageCache[id] = image
+        return image
+    }
+
+    /// Deletes image files no note uses any more. Runs at unlock, when there is no undo history
+    /// that could bring a removed image back. Skipped if any note failed to open, since an
+    /// unreadable note may still need its images.
+    private func removeUnusedAttachments() {
+        guard let session, unreadableCount == 0, let stored = try? session.attachmentIDs() else { return }
+        let used = Set(notes.flatMap { $0.richText?.attachmentIDs ?? [] })
+        for id in stored where !used.contains(id) {
+            try? session.deleteAttachment(id: id)
+        }
     }
 
     func togglePinned(_ id: UUID) {
@@ -407,8 +458,17 @@ final class AppModel {
         guard note(id)?.isReadOnly != true else { return }
         saveTasks[id]?.cancel()
         saveTasks[id] = nil
+        let images = note(id)?.richText?.attachmentIDs ?? []
         notes.removeAll { $0.id == id }
-        perform { try $0.deleteNote(id: id) }
+        perform { session in
+            try session.deleteNote(id: id)
+            for image in images {
+                try session.deleteAttachment(id: image)
+            }
+        }
+        for image in images {
+            imageCache[image] = nil
+        }
     }
 
     // MARK: - Folders

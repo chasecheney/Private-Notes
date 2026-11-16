@@ -27,8 +27,11 @@ public struct Note: Identifiable, Codable, Equatable, Hashable, Sendable {
     public var id: UUID
     /// The folder this note is in, or nil when it is not in any folder.
     public var folderID: UUID?
-    /// The whole text. The first line doubles as the title, as in Apple Notes.
+    /// The whole text without formatting. The first line doubles as the title, as in Apple Notes.
+    /// Kept in step with `richText`; used for titles, previews, and search.
     public var body: String
+    /// The formatted content. Nil for a note that has only ever been plain text.
+    public var richText: RichText?
     public var createdAt: Date
     public var modifiedAt: Date
     public var isPinned: Bool
@@ -41,6 +44,7 @@ public struct Note: Identifiable, Codable, Equatable, Hashable, Sendable {
         id: UUID = UUID(),
         folderID: UUID? = nil,
         body: String = "",
+        richText: RichText? = nil,
         createdAt: Date = Date(),
         modifiedAt: Date = Date(),
         isPinned: Bool = false,
@@ -50,11 +54,23 @@ public struct Note: Identifiable, Codable, Equatable, Hashable, Sendable {
         self.id = id
         self.folderID = folderID
         self.body = body
+        self.richText = richText
         self.createdAt = createdAt
         self.modifiedAt = modifiedAt
         self.isPinned = isPinned
         self.isReadOnly = isReadOnly
         self.neverSync = neverSync
+    }
+
+    /// The formatted content, built from the plain text when the note has none yet.
+    public var content: RichText {
+        richText ?? RichText(plainText: body)
+    }
+
+    /// Replaces the content, keeping the plain text in step.
+    public mutating func setContent(_ newContent: RichText) {
+        richText = newContent
+        body = newContent.plainText
     }
 
     /// First non-blank line.

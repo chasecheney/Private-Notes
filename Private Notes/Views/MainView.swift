@@ -1,5 +1,7 @@
+import PhotosUI
 import PrivateNotesStore
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The three panels: folders, note list, editor.
 struct MainView: View {
@@ -286,28 +288,59 @@ private struct NoteRow: View {
     }
 }
 
-/// One note: a plain-text editor, or a selectable read-only view when the note is protected.
-/// Rich text and images come later.
+/// One note in the editor, with its formatting toolbar. Read-only notes can be read and
+/// selected but not changed.
 struct NoteEditorView: View {
     @Environment(AppModel.self) private var model
     let noteID: UUID
-    @State private var text = ""
-    @State private var loaded = false
+    @State private var controller = EditorController()
     @State private var showingPasswordPrompt = false
+    @State private var showingFileImporter = false
+    @State private var showingPhotoPicker = false
+    @State private var pickedPhoto: PhotosPickerItem?
 
     private var isReadOnly: Bool {
         model.note(noteID)?.isReadOnly ?? false
     }
 
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
             if isReadOnly {
-                readOnlyBody
-            } else {
-                editor
+                HStack(spacing: 6) {
+                    Image(systemName: "lock.doc")
+                    Text("Read-only")
+                    Spacer()
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(.quaternary.opacity(0.4))
             }
+
+            RichTextEditor(
+                initialText: model.content(noteID),
+                isEditable: !isReadOnly,
+                controller: controller,
+                loadImage: { model.image(for: $0) },
+                onChange: { model.updateContent(noteID, $0) },
+                onPasteImage: { insertImage($0) }
+            )
         }
         .toolbar {
+            ToolbarItem {
+                formatMenu
+                    .disabled(isReadOnly)
+            }
+            ToolbarItem {
+                Menu {
+                    Button("Photo Library…") { showingPhotoPicker = true }
+                    Button("Choose File…") { showingFileImporter = true }
+                } label: {
+                    Label("Add Image", systemImage: "photo")
+                }
+                .disabled(isReadOnly)
+            }
             ToolbarItem {
                 if isReadOnly {
                     Button {
@@ -330,52 +363,61 @@ struct NoteEditorView: View {
         .sheet(isPresented: $showingPasswordPrompt) {
             EditPasswordPrompt(noteID: noteID)
         }
+        .photosPicker(isPresented: $showingPhotoPicker, selection: $pickedPhoto, matching: .images)
+        .onChange(of: pickedPhoto) { _, item in
+            guard let item else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self) {
+                    insertImage(data)
+                }
+                pickedPhoto = nil
+            }
+        }
+        .fileImporter(isPresented: $showingFileImporter, allowedContentTypes: [.image]) { result in
+            guard case .success(let url) = result else { return }
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            if let data = try? Data(contentsOf: url) {
+                insertImage(data)
+            } else {
+                model.errorMessage = "That file couldn't be read."
+            }
+        }
+        .onDisappear {
+            model.flushPendingSaves()
+        }
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
     }
 
-    private var editor: some View {
-        TextEditor(text: $text)
-            .font(.body)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .onAppear {
-                text = model.note(noteID)?.body ?? ""
-                loaded = true
+    private var formatMenu: some View {
+        Menu {
+            Section("Style") {
+                Button("Title") { controller.setStyle(.title) }
+                Button("Heading") { controller.setStyle(.heading) }
+                Button("Subheading") { controller.setStyle(.subheading) }
+                Button("Body") { controller.setStyle(.body) }
+                Button("Monospaced") { controller.setStyle(.monospaced) }
             }
-            .onChange(of: text) { _, newValue in
-                if loaded {
-                    model.updateBody(noteID, newValue)
-                }
+            Section("Text") {
+                Button("Bold") { controller.toggle(.bold) }
+                    .keyboardShortcut("b")
+                Button("Italic") { controller.toggle(.italic) }
+                    .keyboardShortcut("i")
+                Button("Underline") { controller.toggle(.underline) }
+                    .keyboardShortcut("u")
+                Button("Strikethrough") { controller.toggle(.strikethrough) }
             }
-            .onDisappear {
-                loaded = false
-                model.flushPendingSaves()
-            }
+        } label: {
+            Label("Format", systemImage: "textformat")
+        }
     }
 
-    private var readOnlyBody: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 6) {
-                Image(systemName: "lock.doc")
-                Text("Read-only")
-                Spacer()
-            }
-            .font(.callout)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(.quaternary.opacity(0.4))
-
-            ScrollView {
-                Text(model.note(noteID)?.body ?? "")
-                    .font(.body)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
-            }
-        }
+    /// Stores the image encrypted, then places it at the cursor.
+    private func insertImage(_ data: Data) {
+        guard !isReadOnly, let added = model.addImage(data) else { return }
+        controller.insertImage(id: added.id, image: added.image)
     }
 }
 

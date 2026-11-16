@@ -31,6 +31,38 @@ public final class VaultSession: Sendable {
     public func deleteFolder(id: UUID) throws { try remove(.folder, id) }
     public func deleteNote(id: UUID) throws { try remove(.note, id) }
 
+    // MARK: - Attachments (images)
+
+    private static func attachmentContext(_ id: UUID) -> ItemContext {
+        ItemContext(kind: .attachment, id: id)
+    }
+
+    /// Encrypts and stores an image's bytes under its own id.
+    public func saveAttachment(id: UUID, data: Data) throws {
+        let sealed = try cipher.seal(data, for: Self.attachmentContext(id))
+        try FileManager.default.createDirectory(at: folderURL(for: .attachment), withIntermediateDirectories: true)
+        try VaultFiles.write(sealed, to: fileURL(.attachment, id))
+    }
+
+    public func loadAttachment(id: UUID) throws -> Data {
+        let sealed = try Data(contentsOf: fileURL(.attachment, id))
+        return try cipher.open(sealed, for: Self.attachmentContext(id))
+    }
+
+    public func deleteAttachment(id: UUID) throws {
+        try remove(.attachment, id)
+    }
+
+    /// Ids of every attachment file in the vault, whether or not a note still uses it.
+    public func attachmentIDs() throws -> [UUID] {
+        let folder = folderURL(for: .attachment)
+        guard FileManager.default.fileExists(atPath: folder.path) else { return [] }
+        return try FileManager.default
+            .contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == Self.fileExtension }
+            .compactMap { UUID(uuidString: $0.deletingPathExtension().lastPathComponent) }
+    }
+
     // MARK: - Key check
 
     private static let keyCheckContext = ItemContext(
