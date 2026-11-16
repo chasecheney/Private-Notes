@@ -69,6 +69,7 @@ extension RichTextEditor: NSViewRepresentable {
         load(into: textView)
         textView.delegate = context.coordinator
         textView.onPasteImage = onPasteImage
+        textView.onFormatShortcut = { [controller] trait in controller.toggle(trait) }
         controller.textView = textView
         controller.onChange = onChange
 
@@ -115,6 +116,28 @@ extension RichTextEditor: NSViewRepresentable {
 /// Text view that pastes plain text (taking the note's formatting) and hands pasted images to the app.
 final class NoteTextView: NSTextView {
     var onPasteImage: ((Data) -> Void)?
+    /// Command-B, Command-I, or Command-U was pressed while typing in this view.
+    var onFormatShortcut: ((EditorController.Trait) -> Void)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.type == .keyDown, modifiers == .command, isEditable, window?.firstResponder === self {
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "b":
+                onFormatShortcut?(.bold)
+                return true
+            case "i":
+                onFormatShortcut?(.italic)
+                return true
+            case "u":
+                onFormatShortcut?(.underline)
+                return true
+            default:
+                break
+            }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
 
     override func paste(_ sender: Any?) {
         let pasteboard = NSPasteboard.general
@@ -152,6 +175,7 @@ extension RichTextEditor: UIViewRepresentable {
         load(into: textView)
         textView.delegate = context.coordinator
         textView.onPasteImage = onPasteImage
+        textView.onFormatShortcut = { [controller] trait in controller.toggle(trait) }
         controller.textView = textView
         controller.onChange = onChange
         return textView
@@ -195,6 +219,25 @@ extension RichTextEditor: UIViewRepresentable {
 /// Text view that pastes plain text (taking the note's formatting) and hands pasted images to the app.
 final class NoteTextView: UITextView {
     var onPasteImage: ((Data) -> Void)?
+    /// Command-B, Command-I, or Command-U was pressed on a hardware keyboard.
+    var onFormatShortcut: ((EditorController.Trait) -> Void)?
+
+    override var keyCommands: [UIKeyCommand]? {
+        guard isEditable else { return super.keyCommands }
+        let commands = [
+            UIKeyCommand(title: "Bold", action: #selector(shortcutBold), input: "b", modifierFlags: .command),
+            UIKeyCommand(title: "Italic", action: #selector(shortcutItalic), input: "i", modifierFlags: .command),
+            UIKeyCommand(title: "Underline", action: #selector(shortcutUnderline), input: "u", modifierFlags: .command),
+        ]
+        for command in commands {
+            command.wantsPriorityOverSystemBehavior = true
+        }
+        return commands + (super.keyCommands ?? [])
+    }
+
+    @objc private func shortcutBold() { onFormatShortcut?(.bold) }
+    @objc private func shortcutItalic() { onFormatShortcut?(.italic) }
+    @objc private func shortcutUnderline() { onFormatShortcut?(.underline) }
 
     override func paste(_ sender: Any?) {
         let pasteboard = UIPasteboard.general

@@ -401,12 +401,10 @@ struct NoteEditorView: View {
                 Button("Monospaced") { controller.setStyle(.monospaced) }
             }
             Section("Text") {
-                Button("Bold") { controller.toggle(.bold) }
-                    .keyboardShortcut("b")
-                Button("Italic") { controller.toggle(.italic) }
-                    .keyboardShortcut("i")
-                Button("Underline") { controller.toggle(.underline) }
-                    .keyboardShortcut("u")
+                // ⌘B, ⌘I and ⌘U are handled by the text view itself, so they work while typing.
+                Button("Bold  ⌘B") { controller.toggle(.bold) }
+                Button("Italic  ⌘I") { controller.toggle(.italic) }
+                Button("Underline  ⌘U") { controller.toggle(.underline) }
                 Button("Strikethrough") { controller.toggle(.strikethrough) }
             }
         } label: {
