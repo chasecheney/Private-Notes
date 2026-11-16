@@ -1,3 +1,4 @@
+import PrivateNotesEditing
 import PrivateNotesStore
 import SwiftUI
 
@@ -5,7 +6,9 @@ import SwiftUI
 ///
 /// The text is loaded once, when the view is created. Give the view a different `.id` to show
 /// a different note. Typed and pasted text always takes the note's own fonts and colors:
-/// formatting from other apps is not brought in.
+/// formatting from other apps is not brought in. Copying out is ordinary copying: nothing
+/// expires and nothing is held back.
+@MainActor
 struct RichTextEditor {
     let initialText: RichText
     let isEditable: Bool
@@ -28,8 +31,21 @@ struct RichTextEditor {
         textView.attributedText = content
         #endif
         // What typing looks like in an empty note, or after the last character.
-        let lastStyle = initialText.paragraphs.last.flatMap { $0.runs.isEmpty ? nil : $0.style } ?? .body
-        textView.typingAttributes = TextFormat(style: lastStyle).attributes
+        let last = initialText.paragraphs.last
+        let lastStyle = last.flatMap { $0.runs.isEmpty && $0.list == nil ? nil : $0.style } ?? .body
+        textView.typingAttributes = TextFormat(
+            style: lastStyle,
+            list: last?.list,
+            indent: last?.list == nil ? 0 : (last?.indent ?? 0)
+        ).attributes
+    }
+
+    fileprivate func connect(_ textView: NoteTextView) {
+        textView.onPasteImage = onPasteImage
+        textView.onFormatShortcut = { [controller] trait in controller.toggle(trait) }
+        textView.onOutdent = { [controller] in controller.changeIndent(by: -1) }
+        controller.textView = textView
+        controller.onChange = onChange
     }
 }
 
@@ -68,10 +84,7 @@ extension RichTextEditor: NSViewRepresentable {
 
         load(into: textView)
         textView.delegate = context.coordinator
-        textView.onPasteImage = onPasteImage
-        textView.onFormatShortcut = { [controller] trait in controller.toggle(trait) }
-        controller.textView = textView
-        controller.onChange = onChange
+        connect(textView)
 
         scrollView.documentView = textView
         return scrollView
@@ -99,25 +112,48 @@ extension RichTextEditor: NSViewRepresentable {
             shouldChangeTextIn affectedCharRange: NSRange,
             replacementString: String?
         ) -> Bool {
-            newlineTyped = replacementString == "\n"
+            if !controller.isApplyingEdits {
+                newlineTyped = replacementString == "\n"
+            }
             return true
         }
 
         func textDidChange(_ notification: Notification) {
-            if newlineTyped {
-                newlineTyped = false
-                controller.newlineWasTyped()
+            guard !controller.isApplyingEdits else { return }
+            let wasNewline = newlineTyped
+            newlineTyped = false
+            controller.userDidEdit(newlineTyped: wasNewline)
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            controller.selectionDidChange()
+        }
+
+        /// Return, Tab, Shift-Tab, and Backspace behave differently inside a list.
+        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            switch commandSelector {
+            case #selector(NSResponder.insertNewline(_:)):
+                return controller.handleReturn()
+            case #selector(NSResponder.insertTab(_:)):
+                return controller.changeIndent(by: 1)
+            case #selector(NSResponder.insertBacktab(_:)):
+                return controller.changeIndent(by: -1)
+            case #selector(NSResponder.deleteBackward(_:)):
+                return controller.handleBackspace()
+            default:
+                return false
             }
-            controller.contentDidChange()
         }
     }
 }
 
-/// Text view that pastes plain text (taking the note's formatting) and hands pasted images to the app.
+/// The Mac text view: pastes plain text (taking the note's formatting), hands pasted images
+/// to the app, copies clean text for other apps, and handles the formatting shortcuts.
 final class NoteTextView: NSTextView {
     var onPasteImage: ((Data) -> Void)?
     /// Command-B, Command-I, or Command-U was pressed while typing in this view.
     var onFormatShortcut: ((EditorController.Trait) -> Void)?
+    var onOutdent: (() -> Void)?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -153,10 +189,38 @@ final class NoteTextView: NSTextView {
             pasteAsPlainText(sender)
         }
     }
+
+    override func copy(_ sender: Any?) {
+        if !writeSelectionToClipboard() {
+            super.copy(sender)
+        }
+    }
+
+    override func cut(_ sender: Any?) {
+        guard isEditable, writeSelectionToClipboard() else {
+            super.cut(sender)
+            return
+        }
+        delete(sender)
+    }
+
+    private func writeSelectionToClipboard() -> Bool {
+        let range = selectedRange()
+        guard range.length > 0, let textStorage else { return false }
+        let exported = ClipboardText.export(textStorage.attributedSubstring(from: range))
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(exported.plain, forType: .string)
+        if let rtf = exported.rtf {
+            pasteboard.setData(rtf, forType: .rtf)
+        }
+        return true
+    }
 }
 
 #else
 import UIKit
+import UniformTypeIdentifiers
 
 extension RichTextEditor: UIViewRepresentable {
     func makeUIView(context: Context) -> NoteTextView {
@@ -174,10 +238,7 @@ extension RichTextEditor: UIViewRepresentable {
 
         load(into: textView)
         textView.delegate = context.coordinator
-        textView.onPasteImage = onPasteImage
-        textView.onFormatShortcut = { [controller] trait in controller.toggle(trait) }
-        controller.textView = textView
-        controller.onChange = onChange
+        connect(textView)
         return textView
     }
 
@@ -197,30 +258,42 @@ extension RichTextEditor: UIViewRepresentable {
             self.controller = controller
         }
 
+        /// Return, Tab, and Backspace behave differently inside a list.
         func textView(
             _ textView: UITextView,
             shouldChangeTextIn range: NSRange,
             replacementText text: String
         ) -> Bool {
+            if controller.isApplyingEdits { return true }
+            if text == "\n", controller.handleReturn() { return false }
+            if text == "\t", controller.changeIndent(by: 1) { return false }
+            if text.isEmpty, range.length == 1, controller.handleBackspace() { return false }
             newlineTyped = text == "\n"
             return true
         }
 
         func textViewDidChange(_ textView: UITextView) {
-            if newlineTyped {
-                newlineTyped = false
-                controller.newlineWasTyped()
-            }
-            controller.contentDidChange()
+            guard !controller.isApplyingEdits else { return }
+            let wasNewline = newlineTyped
+            newlineTyped = false
+            controller.userDidEdit(newlineTyped: wasNewline)
+        }
+
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            controller.selectionDidChange()
         }
     }
 }
 
-/// Text view that pastes plain text (taking the note's formatting) and hands pasted images to the app.
+/// The iPhone and iPad text view: pastes plain text (taking the note's formatting), hands
+/// pasted images to the app, copies clean text for other apps, and handles hardware-keyboard
+/// shortcuts.
 final class NoteTextView: UITextView {
     var onPasteImage: ((Data) -> Void)?
     /// Command-B, Command-I, or Command-U was pressed on a hardware keyboard.
     var onFormatShortcut: ((EditorController.Trait) -> Void)?
+    /// Shift-Tab was pressed on a hardware keyboard.
+    var onOutdent: (() -> Void)?
 
     override var keyCommands: [UIKeyCommand]? {
         guard isEditable else { return super.keyCommands }
@@ -228,6 +301,7 @@ final class NoteTextView: UITextView {
             UIKeyCommand(title: "Bold", action: #selector(shortcutBold), input: "b", modifierFlags: .command),
             UIKeyCommand(title: "Italic", action: #selector(shortcutItalic), input: "i", modifierFlags: .command),
             UIKeyCommand(title: "Underline", action: #selector(shortcutUnderline), input: "u", modifierFlags: .command),
+            UIKeyCommand(title: "Outdent", action: #selector(shortcutOutdent), input: "\t", modifierFlags: .shift),
         ]
         for command in commands {
             command.wantsPriorityOverSystemBehavior = true
@@ -238,6 +312,7 @@ final class NoteTextView: UITextView {
     @objc private func shortcutBold() { onFormatShortcut?(.bold) }
     @objc private func shortcutItalic() { onFormatShortcut?(.italic) }
     @objc private func shortcutUnderline() { onFormatShortcut?(.underline) }
+    @objc private func shortcutOutdent() { onOutdent?() }
 
     override func paste(_ sender: Any?) {
         let pasteboard = UIPasteboard.general
@@ -250,6 +325,36 @@ final class NoteTextView: UITextView {
         } else if isEditable, pasteboard.hasImages, let data = pasteboard.image?.pngData() {
             onPasteImage?(data)
         }
+    }
+
+    override func copy(_ sender: Any?) {
+        if !writeSelectionToClipboard() {
+            super.copy(sender)
+        }
+    }
+
+    override func cut(_ sender: Any?) {
+        guard isEditable, writeSelectionToClipboard() else {
+            super.cut(sender)
+            return
+        }
+        let range = selectedRange
+        textStorage.replaceCharacters(in: range, with: "")
+        selectedRange = NSRange(location: range.location, length: 0)
+        undoManager?.removeAllActions()
+        delegate?.textViewDidChange?(self)
+    }
+
+    private func writeSelectionToClipboard() -> Bool {
+        let range = selectedRange
+        guard range.length > 0 else { return false }
+        let exported = ClipboardText.export(textStorage.attributedSubstring(from: range))
+        var item: [String: Any] = [UTType.utf8PlainText.identifier: exported.plain]
+        if let rtf = exported.rtf {
+            item[UTType.rtf.identifier] = rtf
+        }
+        UIPasteboard.general.setItems([item], options: [:])
+        return true
     }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {

@@ -10,6 +10,7 @@ let package = Package(
     products: [
         .library(name: "PrivateNotesCrypto", targets: ["PrivateNotesCrypto"]),
         .library(name: "PrivateNotesStore", targets: ["PrivateNotesStore"]),
+        .library(name: "PrivateNotesEditing", targets: ["PrivateNotesEditing"]),
     ],
     dependencies: [
         // The one approved third-party dependency. Provides Argon2id (libsodium).
@@ -35,6 +36,16 @@ let package = Package(
         .testTarget(
             name: "PrivateNotesStoreTests",
             dependencies: ["PrivateNotesStore"]
+        ),
+        // How rich text looks and behaves in a text view: fonts, lists, and the
+        // translation to and from the stored model. No views, so it can be tested.
+        .target(
+            name: "PrivateNotesEditing",
+            dependencies: ["PrivateNotesStore"]
+        ),
+        .testTarget(
+            name: "PrivateNotesEditingTests",
+            dependencies: ["PrivateNotesEditing"]
         ),
     ]
 )

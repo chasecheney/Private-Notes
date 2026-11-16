@@ -56,6 +56,33 @@ final class RichTextTests: XCTestCase {
         XCTAssertEqual(rich.paragraphs[2], .init(style: .body, runs: []))
     }
 
+    func testListsAndIndentRoundTripAndStaySmall() throws {
+        let rich = RichText(paragraphs: [
+            .init(list: .numbered, indent: 2, runs: [.init(text: "item")]),
+            .init(runs: [.init(text: "plain")]),
+        ])
+        let data = try JSONEncoder().encode(rich)
+        XCTAssertEqual(try JSONDecoder().decode(RichText.self, from: data), rich)
+        // A plain paragraph writes neither a list nor an indent.
+        let plain = String(decoding: try JSONEncoder().encode(rich.paragraphs[1]), as: UTF8.self)
+        XCTAssertFalse(plain.contains("list"))
+        XCTAssertFalse(plain.contains("indent"))
+    }
+
+    func testIndentIsClampedAndUnknownListKindsIgnored() throws {
+        XCTAssertEqual(RichText.Paragraph(list: .bullet, indent: 99).indent, RichText.Paragraph.maximumIndent)
+        XCTAssertEqual(RichText.Paragraph(indent: -3).indent, 0)
+        let json = #"{"style":"body","list":"checklist","indent":40,"runs":[]}"#
+        let decoded = try JSONDecoder().decode(RichText.Paragraph.self, from: Data(json.utf8))
+        XCTAssertNil(decoded.list)
+        XCTAssertEqual(decoded.indent, RichText.Paragraph.maximumIndent)
+    }
+
+    func testNormalizedDropsIndentFromNonListParagraphs() {
+        let rich = RichText(paragraphs: [.init(indent: 3, runs: [.init(text: "x")])])
+        XCTAssertEqual(rich.normalized().paragraphs[0].indent, 0)
+    }
+
     func testNormalizedMergesAndCleans() {
         let image = UUID()
         let messy = RichText(paragraphs: [

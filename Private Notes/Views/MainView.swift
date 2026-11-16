@@ -407,6 +407,14 @@ struct NoteEditorView: View {
                 Button("Underline  ⌘U") { controller.toggle(.underline) }
                 Button("Strikethrough") { controller.toggle(.strikethrough) }
             }
+            Section("List") {
+                Button("Bulleted List") { controller.toggleList(.bullet) }
+                Button("Dashed List") { controller.toggleList(.dash) }
+                Button("Numbered List") { controller.toggleList(.numbered) }
+                // Tab and Shift-Tab do the same from the keyboard.
+                Button("Indent") { controller.changeIndent(by: 1) }
+                Button("Outdent") { controller.changeIndent(by: -1) }
+            }
         } label: {
             Label("Format", systemImage: "textformat")
         }

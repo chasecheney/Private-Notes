@@ -48,6 +48,16 @@
                ReferencedContainer = "container:PrivateNotesCrypto">
             </BuildableReference>
          </TestableReference>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "PrivateNotesEditingTests"
+               BuildableName = "PrivateNotesEditingTests"
+               BlueprintName = "PrivateNotesEditingTests"
+               ReferencedContainer = "container:PrivateNotesCrypto">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

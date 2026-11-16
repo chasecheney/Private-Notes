@@ -18,23 +18,49 @@ public struct RichText: Codable, Equatable, Hashable, Sendable {
         case monospaced
     }
 
+    public enum ListKind: String, Codable, CaseIterable, Sendable {
+        case bullet
+        case dash
+        case numbered
+    }
+
     public struct Paragraph: Codable, Equatable, Hashable, Sendable {
+        public static let maximumIndent = 6
+
         public var style: Style
+        /// Set when this paragraph is a list item. The bullet or number is not part of `runs`.
+        public var list: ListKind?
+        /// Nesting depth of a list item, 0 for the outermost level.
+        public var indent: Int
         public var runs: [Run]
 
-        public init(style: Style = .body, runs: [Run] = []) {
+        public init(style: Style = .body, list: ListKind? = nil, indent: Int = 0, runs: [Run] = []) {
             self.style = style
+            self.list = list
+            self.indent = min(max(indent, 0), Self.maximumIndent)
             self.runs = runs
         }
 
-        private enum CodingKeys: String, CodingKey { case style, runs }
+        private enum CodingKeys: String, CodingKey { case style, list, indent, runs }
 
         public init(from decoder: Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
-            // An unknown style from a newer version falls back to body instead of failing the note.
+            // Unknown values from a newer version fall back to plain body text instead of failing the note.
             let rawStyle = try values.decodeIfPresent(String.self, forKey: .style)
             self.style = rawStyle.flatMap(Style.init(rawValue:)) ?? .body
+            let rawList = try values.decodeIfPresent(String.self, forKey: .list)
+            self.list = rawList.flatMap(ListKind.init(rawValue:))
+            let rawIndent = try values.decodeIfPresent(Int.self, forKey: .indent) ?? 0
+            self.indent = min(max(rawIndent, 0), Self.maximumIndent)
             self.runs = try values.decodeIfPresent([Run].self, forKey: .runs) ?? []
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var values = encoder.container(keyedBy: CodingKeys.self)
+            try values.encode(style.rawValue, forKey: .style)
+            try values.encodeIfPresent(list?.rawValue, forKey: .list)
+            if indent > 0 { try values.encode(indent, forKey: .indent) }
+            try values.encode(runs, forKey: .runs)
         }
     }
 
@@ -141,7 +167,12 @@ public struct RichText: Codable, Equatable, Hashable, Sendable {
                     merged.append(run)
                 }
             }
-            return Paragraph(style: paragraph.style, runs: merged)
+            return Paragraph(
+                style: paragraph.style,
+                list: paragraph.list,
+                indent: paragraph.list == nil ? 0 : paragraph.indent,
+                runs: merged
+            )
         })
     }
 }

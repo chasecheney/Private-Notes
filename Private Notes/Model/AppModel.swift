@@ -4,6 +4,7 @@ import Observation
 import AppKit
 #endif
 import PrivateNotesCrypto
+import PrivateNotesEditing
 import PrivateNotesStore
 
 /// Which folder the note list is showing.

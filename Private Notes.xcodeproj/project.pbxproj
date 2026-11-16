@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		C0DE00000000000000000001 /* PrivateNotesCrypto in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE00000000000000000002 /* PrivateNotesCrypto */; };
 		C0DE00000000000000000015 /* PrivateNotesStore in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE00000000000000000016 /* PrivateNotesStore */; };
+		C0DE00000000000000000017 /* PrivateNotesEditing in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE00000000000000000018 /* PrivateNotesEditing */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -31,6 +32,7 @@
 			files = (
 				C0DE00000000000000000001 /* PrivateNotesCrypto in Frameworks */,
 				C0DE00000000000000000015 /* PrivateNotesStore in Frameworks */,
+				C0DE00000000000000000017 /* PrivateNotesEditing in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -76,6 +78,7 @@
 			packageProductDependencies = (
 				C0DE00000000000000000002 /* PrivateNotesCrypto */,
 				C0DE00000000000000000016 /* PrivateNotesStore */,
+				C0DE00000000000000000018 /* PrivateNotesEditing */,
 			);
 			productName = "Private Notes";
 			productReference = C0DE00000000000000000003 /* Private Notes.app */;
@@ -341,6 +344,10 @@
 		C0DE00000000000000000016 /* PrivateNotesStore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = PrivateNotesStore;
+		};
+		C0DE00000000000000000018 /* PrivateNotesEditing */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PrivateNotesEditing;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
