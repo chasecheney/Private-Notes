@@ -204,6 +204,31 @@ final class NoteTextView: NSTextView {
         delete(sender)
     }
 
+    /// Puts only the plain text of the selection on the clipboard.
+    @objc func copyWithoutFormatting(_ sender: Any?) {
+        let range = selectedRange()
+        guard range.length > 0, let textStorage else { return }
+        let exported = ClipboardText.export(textStorage.attributedSubstring(from: range))
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(exported.plain, forType: .string)
+    }
+
+    /// Adds "Copy Without Formatting" to the right-click menu, under Copy.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let menu = super.menu(for: event) else { return nil }
+        guard selectedRange().length > 0 else { return menu }
+        let item = NSMenuItem(
+            title: "Copy Without Formatting",
+            action: #selector(copyWithoutFormatting(_:)),
+            keyEquivalent: ""
+        )
+        item.target = self
+        let copyIndex = menu.items.firstIndex { $0.action == #selector(NSText.copy(_:)) }
+        menu.insertItem(item, at: copyIndex.map { $0 + 1 } ?? 0)
+        return menu
+    }
+
     private func writeSelectionToClipboard() -> Bool {
         let range = selectedRange()
         guard range.length > 0, let textStorage else { return false }
@@ -282,6 +307,22 @@ extension RichTextEditor: UIViewRepresentable {
         func textViewDidChangeSelection(_ textView: UITextView) {
             controller.selectionDidChange()
         }
+
+        /// Adds "Copy Without Formatting" to the menu shown for selected text.
+        func textView(
+            _ textView: UITextView,
+            editMenuForTextIn range: NSRange,
+            suggestedActions: [UIMenuElement]
+        ) -> UIMenu? {
+            guard range.length > 0, let noteView = textView as? NoteTextView else { return nil }
+            let plainCopy = UIAction(
+                title: "Copy Without Formatting",
+                image: UIImage(systemName: "doc.plaintext")
+            ) { _ in
+                noteView.copyWithoutFormatting(nil)
+            }
+            return UIMenu(children: suggestedActions + [plainCopy])
+        }
     }
 }
 
@@ -345,6 +386,14 @@ final class NoteTextView: UITextView {
         delegate?.textViewDidChange?(self)
     }
 
+    /// Puts only the plain text of the selection on the clipboard.
+    @objc func copyWithoutFormatting(_ sender: Any?) {
+        let range = selectedRange
+        guard range.length > 0 else { return }
+        let exported = ClipboardText.export(textStorage.attributedSubstring(from: range))
+        UIPasteboard.general.string = exported.plain
+    }
+
     private func writeSelectionToClipboard() -> Bool {
         let range = selectedRange
         guard range.length > 0 else { return false }
@@ -365,3 +414,16 @@ final class NoteTextView: UITextView {
     }
 }
 #endif
+
+/// Commands the menu bar sends to whichever note text view has the cursor.
+@MainActor
+enum EditorCommands {
+    static func copyWithoutFormatting() {
+        let action = #selector(NoteTextView.copyWithoutFormatting(_:))
+        #if os(macOS)
+        NSApp.sendAction(action, to: nil, from: nil)
+        #else
+        UIApplication.shared.sendAction(action, to: nil, from: nil, for: nil)
+        #endif
+    }
+}

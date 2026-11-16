@@ -10,6 +10,14 @@ struct PrivateNotesApp: App {
             RootView()
                 .environment(model)
         }
+        .commands {
+            CommandGroup(after: .pasteboard) {
+                Button("Copy Without Formatting") {
+                    EditorCommands.copyWithoutFormatting()
+                }
+                .keyboardShortcut("c", modifiers: [.command, .shift])
+            }
+        }
         .onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
             case .active:
